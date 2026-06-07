@@ -1,0 +1,39 @@
+# vLLM Metrics Collector Configuration
+#
+# List all vLLM server instances you want to monitor.
+# Each server must have a unique name and reachable URL.
+#
+# The daemon scrapes /metrics on each server, splits statistics
+# by model_name label, and stores them for long-term reporting.
+
+servers:
+  - name: spark-1-mistral
+    url: http://192.168.1.10:8000
+    notes: Mistral-Small-4-NVFP4 on Spark #1 (solo)
+
+  - name: spark-1-nemotron
+    url: http://192.168.1.10:8001
+    notes: Nemotron-3-Super on Spark #1
+
+  - name: spark-2-mistral
+    url: http://192.168.1.11:8000
+    notes: Mistral-Small-4-NVFP4 on Spark #2
+
+  - name: cluster-glm
+    url: http://192.168.1.10:8000
+    notes: GLM-4.7 on 2-node cluster
+
+  - name: local-test
+    url: http://localhost:8000
+    notes: Local test instance
+
+# Collection interval in seconds (default: 60)
+interval: 60
+
+# Database path (default: ~/.vllm-metrics.db)
+database: ~/.vllm-metrics.db
+
+# How long to keep raw snapshots before pruning to daily rollups (days)
+# Raw data older than this is aggregated into daily summaries and deleted.
+# Set to 0 to keep raw data forever.
+raw_retention_days: 90

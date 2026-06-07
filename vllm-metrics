@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+"""
+vLLM Metrics Collector - CLI entry point.
+
+Usage:
+  vllm-metrics daemon                  Run the collection daemon
+  vllm-metrics daemon --config FILE    Use custom config
+  vllm-metrics scrape                  One-shot scrape and store
+  vllm-metrics report                  Generate usage report (last 7 days)
+  vllm-metrics report --since YYYY-MM-DD --until YYYY-MM-DD
+  vllm-metrics report --model MODEL    Filter by model name
+  vllm-metrics report --server NAME    Filter by server name
+  vllm-metrics report --days 30        Last N days
+  vllm-metrics servers                 List configured and discovered servers
+  vllm-metrics models                  List all tracked models
+"""
+
+import argparse
+import os
+import sys
+from datetime import datetime, timedelta, timezone
+
+# Add project root to path
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+from vllm_metrics import (
+    connect, get_db_path,
+    load_config, daemon_loop, run_once,
+    generate_report,
+)
+
+
+def cmd_daemon(args):
+    config = load_config(args.config)
+    daemon_loop(config)
+
+
+def cmd_scrape(args):
+    config = load_config(args.config)
+    db_path = get_db_path(config.get('database', '~/.vllm-metrics.db'))
+    conn = connect(db_path)
+    run_once(conn, config)
+
+
+def cmd_report(args):
+    config = load_config(args.config)
+    db_path = get_db_path(config.get('database', '~/.vllm-metrics.db'))
+    conn = connect(db_path)
+
+    since = None
+    until = None
+
+    if args.days:
+        since = (datetime.now(timezone.utc) - timedelta(days=args.days)).date()
+    elif args.since:
+        since = datetime.fromisoformat(args.since).date()
+
+    if args.until:
+        until = datetime.fromisoformat(args.until).date()
+
+    generate_report(
+        conn,
+        since=since,
+        until=until,
+        model_name=args.model,
+        server_name=args.server,
+    )
+
+
+def cmd_servers(args):
+    config = load_config(args.config)
+    db_path = get_db_path(config.get('database', '~/.vllm-metrics.db'))
+    conn = connect(db_path)
+    from vllm_metrics.db import get_servers
+    servers = get_servers(conn)
+    if not servers:
+        print("No servers tracked yet. Run 'vllm-metrics scrape' first.")
+        return
+    print(f"{'Name':<24} {'URL':<36} {'Last Seen':<20}")
+    print("-" * 80)
+    for sv in servers:
+        last = datetime.fromtimestamp(sv['last_seen']).strftime('%Y-%m-%d %H:%M') if sv.get('last_seen') else 'never'
+        print(f"{sv['name']:<24} {sv['url']:<36} {last:<20}")
+
+
+def cmd_models(args):
+    config = load_config(args.config)
+    db_path = get_db_path(config.get('database', '~/.vllm-metrics.db'))
+    conn = connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT m.model_name, s.name AS server_name,
+               datetime(m.first_seen, 'unixepoch') AS first_seen,
+               datetime(m.last_seen, 'unixepoch') AS last_seen
+        FROM models m
+        JOIN servers s ON m.server_id = s.id
+        ORDER BY m.model_name, s.name
+    """)
+    rows = cursor.fetchall()
+    if not rows:
+        print("No models tracked yet. Run 'vllm-metrics scrape' first.")
+        return
+    print(f"{'Model':<60} {'Server':<20} {'First Seen':<20} {'Last Seen':<20}")
+    print("-" * 120)
+    for row in rows:
+        print(f"{row['model_name']:<60} {row['server_name']:<20} {row['first_seen']:<20} {row['last_seen']:<20}")
+
+
+def main():
+    # Default config paths
+    default_configs = [
+        os.path.join(PROJECT_ROOT, 'config.yaml'),
+        os.path.expanduser('~/.vllm-metrics/config.yaml'),
+    ]
+    default_config = next((p for p in default_configs if os.path.exists(p)), default_configs[0])
+
+    parser = argparse.ArgumentParser(
+        description="vLLM Metrics Collector - track token generation across all your vLLM servers",
+    )
+    parser.add_argument('--config', '-c', default=default_config,
+                        help=f'Config file path (default: {default_config})')
+
+    sub = parser.add_subparsers(dest='command', required=True)
+
+    # daemon
+    p = sub.add_parser('daemon', help='Run the collection daemon continuously')
+
+    # scrape
+    p = sub.add_parser('scrape', help='One-shot scrape all servers and store')
+
+    # report
+    p = sub.add_parser('report', help='Generate usage report')
+    p.add_argument('--since', help='Start date (YYYY-MM-DD)')
+    p.add_argument('--until', help='End date (YYYY-MM-DD)')
+    p.add_argument('--days', type=int, help='Last N days (overrides --since)')
+    p.add_argument('--model', help='Filter by model name')
+    p.add_argument('--server', help='Filter by server name')
+
+    # servers
+    sub.add_parser('servers', help='List tracked servers')
+
+    # models
+    sub.add_parser('models', help='List tracked models')
+
+    args = parser.parse_args()
+
+    if args.command == 'daemon':
+        cmd_daemon(args)
+    elif args.command == 'scrape':
+        cmd_scrape(args)
+    elif args.command == 'report':
+        cmd_report(args)
+    elif args.command == 'servers':
+        cmd_servers(args)
+    elif args.command == 'models':
+        cmd_models(args)
+
+
+if __name__ == '__main__':
+    main()

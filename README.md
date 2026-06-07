@@ -1,0 +1,269 @@
+# vLLM Metrics Collector
+
+Track token generation across all your vLLM servers — aggregated by model, stored for years,
+safe against restarts and downtime.
+
+```
+vllm-metrics daemon   →  runs forever, scrapes every 60s
+vllm-metrics scatter   →  one-shot collect
+vllm-metrics report   →  usage by server + model
+```
+
+## Quick Start
+
+```bash
+pip install pyyaml
+
+# Configure your vLLM server(s)
+vim config.yaml
+
+# One-shot test
+./vllm-metrics scatter
+
+# Background daemon
+nohup ./vllm-metrics daemon &
+
+# View report (last 7 days)
+./vllm-metrics report
+```
+
+## Architecture
+
+```
+                  ┌──────────────────┐
+                  │  config.yaml     │
+                  │  - server list   │
+                  │  - interval      │
+                  └────────┬─────────┘
+                           │
+              ┌────────────┴────────────┐
+              │  vllm-metrics daemon    │
+              │  (or scatter, one-shot) │
+              │                         │
+              │  1. Scrape /metrics     │
+              │  2. Split by model_name │
+              │  3. Compute safe delta  │
+              │  4. Store in SQLite     │
+              │  5. Log to stdout       │
+              └────────────┬────────────┘
+                           │
+              ┌────────────┴────────────┐
+              │  ~/.vllm-metrics.db     │
+              │  - raw_snapshots (90d)  │
+              │  - daily_stats (years)  │
+              └─────────────────────────┘
+```
+
+Each vLLM server exposes `/metrics` (Prometheus format) with counters and histograms
+labelled by `model_name` and `engine`. The scraper reads these, groups them per model,
+computes **incremental deltas** (never stores raw cumulative values), and writes to a
+local SQLite database. Old raw data is rolled up into daily summaries and pruned.
+
+## Commands
+
+### `daemon`
+
+```bash
+./vllm-metrics daemon
+./vllm-metrics daemon --config /path/to/config.yaml
+```
+
+Runs continuously, scraping every `interval` seconds (default: 60).
+- Failed servers are reported once then silenced until they recover.
+- Daily rollup runs automatically after midnight.
+- Server restarts (counter resets) are detected and handled transparently.
+
+### `scatter`
+
+```bash
+./vllm-metrics scatter
+```
+
+One-shot: scrape all servers, store results, exit.
+- On first run, each server+model pair is recorded as a **baseline** (no delta yet).
+- On second run, deltas are computed from the baseline.
+
+### `report`
+
+```bash
+# Last 7 days (default)
+./vllm-metrics report
+
+# Custom range
+./vllm-metrics report --since 2026-01-01 --until 2026-06-01
+
+# Last N days
+./vllm-metrics report --days 30
+
+# Per-model or per-server
+./vllm-metrics report --model "Mistral-Small-4-119B-2603-NVFP4"
+./vllm-metrics report --server spark-1-mistral
+```
+
+### `servers` / `models`
+
+```bash
+./vllm-metrics servers     # list all tracked vLLM instances
+./vllm-metrics models      # list all models seen across all servers
+```
+
+## Delta Tracking (Anti-Double-Count)
+
+The collector **never stores raw cumulative Prometheus counters**. Instead, on each
+scrape it computes `current - last_baseline` and stores only the **delta**:
+
+```
+Scrape #1:  cumulative=500    → no delta (first baseline)
+Scrape #2:  cumulative=700    → delta=700-500=200    ← stored
+Scrape #3:  cumulative=950    → delta=950-700=250    ← stored
+```
+
+This means the report just sums deltas — no `MAX-MIN` trickery needed.
+
+### Server restart
+
+If vLLM crashes and restarts, the counter drops (e.g. `950 → 0 → 120`):
+
+```
+Scrape #4:  cumulative=0      → 0-950=-4800 → RESET → delta=0
+Scrape #5:  cumulative=120    → 120-0=120           ← stored
+```
+
+Rule: **if a counter decreased, treat the new value as the delta** (counter started
+fresh at 0 after restart). No data lost, nothing double-counted.
+
+### Server downtime
+
+When vLLM is unreachable, the daemon prints `[FAIL]` once per server and moves on.
+The baseline stays unchanged. When vLLM returns, the next scrape computes the delta
+from the old baseline — correctly capturing everything that happened during the gap.
+
+## Config
+
+Edit `config.yaml`:
+
+```yaml
+servers:
+  - name: spark-1-mistral
+    url: http://192.168.1.10:8000
+    notes: Mistral-Small-4 on Spark #1
+
+  - name: cluster-nemotron
+    url: http://192.168.1.10:8000
+    notes: Nemotron-3-Super on 2-node cluster
+
+interval: 60                 # scrape every 60 seconds
+database: ~/.vllm-metrics.db
+raw_retention_days: 90       # raw data pruned after rollup
+```
+
+## Database Schema
+
+File: `~/.vllm-metrics.db`
+
+| Table | Contents |
+|-------|----------|
+| `servers` | Tracked vLLM instances (name, url, added_at, last_seen) |
+| `models` | Models discovered per server (model_name, first/last seen) |
+| `raw_snapshots` | Per-scrape **deltas** (incremental counters + gauge snapshots). 90-day retention. |
+| `daily_stats` | Pre-aggregated daily rows (SUM of deltas, AVG of gauges/histograms). Kept forever for year-scale queries. |
+| `last_values` | Last-seen cumulative counter values (the baseline for next delta computation) |
+
+Rollup happens once per day after midnight. The rollup:
+1. SELECTs all raw_snapshots for each completed date
+2. SUMs the deltas into a daily_stats row
+3. DELETEs raw_snapshots older than raw_retention_days
+
+## Collected Metrics
+
+All metrics come from vLLM's Prometheus `/metrics` endpoint.
+
+**Token counters** (stored as incremental deltas):
+| Metric | Tracks |
+|--------|--------|
+| prompt_tokens_total | Prompt tokens processed (by model) |
+| generation_tokens_total | Output tokens generated |
+| prompt_tokens_cached_total | Prefix cache hits |
+| request_success_total | Completed requests |
+| num_preemptions_total | Preempted requests |
+| prefix_cache_hits / queries | Prefix cache efficiency |
+
+**Live gauges** (stored as-is each scrape):
+| Metric | Tracks |
+|--------|--------|
+| num_requests_running | Currently active requests |
+| kv_cache_usage_perc | GPU KV cache utilization |
+
+**Performance histograms** (stored as _count + _sum for averaging):
+| Metric | What it measures |
+|--------|------------------|
+| time_to_first_token_seconds | TTFT (latency to first output token) |
+| inter_token_latency_seconds | ITL / TPOT (time between output tokens) |
+| e2e_request_latency_seconds | End-to-end request duration |
+| request_queue_time_seconds | Time spent waiting in queue |
+| request_prefill_time_seconds | Time in prefill phase |
+| request_decode_time_seconds | Time in decode phase |
+
+## Sample Report
+
+```
+======================================================================
+  vLLM USAGE STATISTICS REPORT
+======================================================================
+  Period:              2026-06-01  to  2026-06-07
+  Models tracked:      3
+
+  GLOBAL TOTALS
+  ----------------------------------------------------------------
+  Total tokens processed (prompt + generation)        14.2M
+    Prompt tokens                                      3.1M
+    Generation tokens                                 11.1M
+    From prefix cache                                  2.4M
+    Prefix cache hit rate                              77.4%
+  Completed requests                                   8,520
+  Preemptions                                             12
+  Active days                                             7
+  Avg prompt tokens per request                          364
+  Avg generation tokens per request                     1303
+
+  PER-MODEL BREAKDOWN
+  ----------------------------------------------------------------
+  [spark-1]  Mistral-Small-4-119B-2603-NVFP4
+    Total tokens                                      14.2M
+    Prompt tokens                                      3.1M
+    Generation tokens                                 11.1M
+    Requests                                          8,520
+    Avg TTFT                                         342.5ms
+    Avg ITL/TPOT                                       18.3ms
+
+  DAILY TREND
+  ----------------------------------------------------------------
+  Date             Prompt tok     Gen tok    Requests
+  ----------------------------------------------------------------
+  2026-06-07          450,000    1,650,000      1,250
+  2026-06-06          420,000    1,580,000      1,190
+  ...
+======================================================================
+```
+
+## Requirements
+
+- Python 3.10+
+- PyYAML (`pip install pyyaml`)
+- Everything else is Python standard library
+
+## Project Structure
+
+```
+~/ai/vllm-metrics/
+├── vllm-metrics            CLI entry point (chmod +x)
+├── config.yaml             Edit for your servers
+├── README.md               This file
+├── AGENT.md                Agent behavior guide
+└── vllm_metrics/
+    ├── __init__.py
+    ├── scraper.py           Prometheus parser + delta computation
+    ├── db.py                SQLite schema + rollup queries
+    ├── report.py            Report formatter
+    └── daemon.py            Main loop
+```

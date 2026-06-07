@@ -262,7 +262,7 @@ def generate_report(conn, since=None, until=None, model_name=None, server_name=N
 
         for i, row in enumerate(rows):
             server = row['server_name'] or '?'
-            model = row['model_name'] or '(aggregate)'
+            model = row['model_name'] or '?'
             if i > 0:
                 print()
 
@@ -291,6 +291,64 @@ def generate_report(conn, since=None, until=None, model_name=None, server_name=N
             if row.get('avg_queue_s'):
                 _print_row("    Avg queue time", _fmt_s(row['avg_queue_s']))
 
+    print()
+
+    # =====================================================
+    # SERVER STATS (from latest unlabeled snapshot)
+    # =====================================================
+    _print_separator()
+    print("  SERVER STATS")
+    _print_separator('-')
+
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT
+            s.name,
+            r.server_uptime_seconds,
+            r.process_resident_memory_bytes,
+            r.process_virtual_memory_bytes,
+            r.process_cpu_seconds_total,
+            r.process_open_fds,
+            r.timestring
+        FROM raw_snapshots r
+        JOIN servers s ON r.server_id = s.id
+        WHERE r.model_id IS NULL
+          AND r.timestamp = (
+              SELECT MAX(r2.timestamp)
+              FROM raw_snapshots r2
+              WHERE r2.server_id = r.server_id AND r2.model_id IS NULL
+          )
+        ORDER BY s.name
+    """)
+
+    server_rows = cursor.fetchall()
+    if server_rows:
+        for row in server_rows:
+            print(f"  [{row['name']}]")
+            uptime = row['server_uptime_seconds']
+            if uptime:
+                days = int(uptime // 86400)
+                hours = int((uptime % 86400) // 3600)
+                mins = int((uptime % 3600) // 60)
+                if days:
+                    _print_row("    Uptime", f"{days}d {hours}h {mins}m")
+                else:
+                    _print_row("    Uptime", f"{hours}h {mins}m")
+            rss = row['process_resident_memory_bytes']
+            if rss:
+                _print_row("    RSS memory", _fmt_number(rss))
+            virt = row['process_virtual_memory_bytes']
+            if virt:
+                _print_row("    Virtual mem", _fmt_number(virt))
+            cpu = row['process_cpu_seconds_total']
+            if cpu:
+                _print_row("    CPU time", _fmt_s(cpu))
+            fds = row['process_open_fds']
+            if fds:
+                _print_row("    Open FDs", f"{int(fds)}")
+            print()
+    else:
+        print("  (no server stats collected yet)")
     print()
 
     # =====================================================

@@ -111,6 +111,7 @@ def _run_summary_query(conn, since=None, until=None, model_name=None, server_nam
         LEFT JOIN models m ON d.model_id = m.id
         WHERE {where}
         GROUP BY s.name, m.model_name
+        HAVING m.model_name IS NOT NULL
         ORDER BY s.name, m.model_name
     """, params)
     return [dict(row) for row in cursor.fetchall()]
@@ -163,6 +164,7 @@ def _run_raw_summary(conn, since=None, until=None, model_name=None, server_name=
         LEFT JOIN models m ON r.model_id = m.id
         WHERE {where}
         GROUP BY s.name, m.model_name
+        HAVING m.model_name IS NOT NULL
         ORDER BY s.name, m.model_name
     """, params)
     return [dict(row) for row in cursor.fetchall()]

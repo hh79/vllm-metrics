@@ -20,8 +20,8 @@ vim config.yaml
 # One-shot test
 ./vllm-metrics scrape
 
-# Background daemon
-nohup ./vllm-metrics daemon &
+# Background daemon (see "Run as a systemd Service" below for production)
+systemctl --user start vllm-metrics
 
 # View report (last 7 days)
 ./vllm-metrics report
@@ -107,6 +107,66 @@ One-shot: scrape all servers, store results, exit.
 ./vllm-metrics models      # list all models seen across all servers
 ```
 
+## Run as a systemd Service
+
+For automatic start on boot + auto-restart on crash, install as a **systemd user service**:
+
+```bash
+# 1. Create the service unit
+mkdir -p ~/.config/systemd/user
+cat > ~/.config/systemd/user/vllm-metrics.service << 'EOF'
+[Unit]
+Description=vLLM Metrics Collector Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/ai/vllm-metrics/vllm-metrics daemon
+WorkingDirectory=%h/ai/vllm-metrics
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
+EOF
+
+# 2. Start now + enable on boot
+systemctl --user daemon-reload
+systemctl --user enable --now vllm-metrics
+```
+
+> **Note:** Adjust `%h/ai/vllm-metrics/vllm-metrics` to match your install path.
+
+**Management commands:**
+
+```bash
+systemctl --user status vllm-metrics     # status + recent logs
+systemctl --user stop vllm-metrics       # stop
+systemctl --user start vllm-metrics      # start
+systemctl --user restart vllm-metrics    # restart
+journalctl --user -u vllm-metrics -f    # live log tail
+```
+
+**Uninstall:**
+
+```bash
+systemctl --user stop vllm-metrics
+systemctl --user disable vllm-metrics
+rm ~/.config/systemd/user/vllm-metrics.service
+systemctl --user daemon-reload
+```
+
+> **Boot without login:** User services start when you log in. For headless boot, run `sudo loginctl enable-linger $(whoami)` first.
+
+**List all user services:**
+
+```bash
+systemctl --user list-units --type=service
+```
+
 ## Delta Tracking (Anti-Double-Count)
 
 The collector **never stores raw cumulative Prometheus counters**. Instead, on each
@@ -165,14 +225,15 @@ File: `~/.vllm-metrics.db`
 |-------|----------|
 | `servers` | Tracked vLLM instances (name, url, added_at, last_seen) |
 | `models` | Models discovered per server (model_name, first/last seen) |
-| `raw_snapshots` | Per-scrape **deltas** (incremental counters + gauge snapshots). 90-day retention. |
+|| `raw_snapshots` | Per-scrape **deltas** (incremental counters + gauge snapshots). Kept indefinitely when `raw_retention_days: 0`. |
 | `daily_stats` | Pre-aggregated daily rows (SUM of deltas, AVG of gauges/histograms). Kept forever for year-scale queries. |
 | `last_values` | Last-seen cumulative counter values (the baseline for next delta computation) |
 
-Rollup happens once per day after midnight. The rollup:
+Rollup happens once per day after midnight (for completed dates only). The rollup:
 1. SELECTs all raw_snapshots for each completed date
 2. SUMs the deltas into a daily_stats row
-3. DELETEs raw_snapshots older than raw_retention_days
+3. If `raw_retention_days > 0`, DELETEs raw_snapshots older than that threshold
+4. When `raw_retention_days: 0`, raw data is never deleted (recommended for per-hour graphing)
 
 ## Collected Metrics
 

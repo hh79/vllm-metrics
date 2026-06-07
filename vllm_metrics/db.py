@@ -171,7 +171,8 @@ def upsert_server(conn: sqlite3.Connection, name: str, url: str, notes: str = ''
             last_seen = excluded.last_seen
     """, (name, url, notes, now, now))
     conn.commit()
-    return cursor.lastrowid
+    cursor.execute("SELECT id FROM servers WHERE name = ?", (name,))
+    return cursor.fetchone()[0]
 
 
 def get_servers(conn: sqlite3.Connection) -> list[dict]:

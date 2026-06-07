@@ -53,7 +53,7 @@ Located in: `vllm_metrics/db.py` → `rollup_and_prune()`, `compute_daily_rollup
 ## CLI Conventions
 
 - Entry point: `vllm-metrics` (executable Python script, no `.py` extension)
-- Subcommands: `daemon`, `scatter`, `report`, `servers`, `models`
+- Subcommands: `daemon`, `scrape`, `report`, `servers`, `models`
 - Config via `--config` flag or auto-detect from `./config.yaml` / `~/.vllm-metrics/config.yaml`
 - All output goes to stdout. Errors to stderr.
 - Daemon suppresses repeated `[FAIL]` messages for persistently down servers

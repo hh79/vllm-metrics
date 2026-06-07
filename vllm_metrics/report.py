@@ -249,12 +249,6 @@ def generate_report(conn, since=None, until=None, model_name=None, server_name=N
     _print_row("Preemptions", _fmt_number(totals['total_preemptions']))
     _print_row("Active days", str(totals['active_days']))
 
-    if totals['total_requests'] and totals['total_requests'] > 0:
-        avg_prompt = totals['total_prompt_tokens'] / totals['total_requests']
-        avg_gen = totals['total_gen_tokens'] / totals['total_requests']
-        _print_row("Avg prompt tokens per request", f"{avg_prompt:.0f}")
-        _print_row("Avg generation tokens per request", f"{avg_gen:.0f}")
-
     print()
 
     # =====================================================
@@ -280,13 +274,19 @@ def generate_report(conn, since=None, until=None, model_name=None, server_name=N
             _print_row("    Preemptions", _fmt_number(row['total_preemptions']))
             _print_row("    Active days", str(row['active_days']))
 
-            if row['avg_ttft_ms']:
+            cached = row.get('total_cached_tokens') or 0
+            if cached:
+                _print_row("    From prefix cache", _fmt_number(cached))
+                prompt_t = row['total_prompt_tokens'] or 1
+                _print_row("    Prefix cache hit rate", f"{cached / prompt_t * 100:.1f}%")
+
+            if row.get('avg_ttft_ms'):
                 _print_row("    Avg TTFT", _fmt_ms(row['avg_ttft_ms'] / 1000))
-            if row['avg_itl_ms']:
+            if row.get('avg_itl_ms'):
                 _print_row("    Avg ITL/TPOT", _fmt_ms(row['avg_itl_ms'] / 1000))
-            if row['avg_e2e_s']:
+            if row.get('avg_e2e_s'):
                 _print_row("    Avg E2E latency", _fmt_s(row['avg_e2e_s']))
-            if row['avg_queue_s']:
+            if row.get('avg_queue_s'):
                 _print_row("    Avg queue time", _fmt_s(row['avg_queue_s']))
 
     print()

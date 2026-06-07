@@ -5,7 +5,7 @@ safe against restarts and downtime.
 
 ```
 vllm-metrics daemon   →  runs forever, scrapes every 60s
-vllm-metrics scatter   →  one-shot collect
+vllm-metrics scrape   →  one-shot collect
 vllm-metrics report   →  usage by server + model
 ```
 
@@ -18,7 +18,7 @@ pip install pyyaml
 vim config.yaml
 
 # One-shot test
-./vllm-metrics scatter
+./vllm-metrics scrape
 
 # Background daemon
 nohup ./vllm-metrics daemon &
@@ -38,7 +38,7 @@ nohup ./vllm-metrics daemon &
                            │
               ┌────────────┴────────────┐
               │  vllm-metrics daemon    │
-              │  (or scatter, one-shot) │
+              │  (or scrape, one-shot) │
               │                         │
               │  1. Scrape /metrics     │
               │  2. Split by model_name │
@@ -73,10 +73,10 @@ Runs continuously, scraping every `interval` seconds (default: 60).
 - Daily rollup runs automatically after midnight.
 - Server restarts (counter resets) are detected and handled transparently.
 
-### `scatter`
+### `scrape`
 
 ```bash
-./vllm-metrics scatter
+./vllm-metrics scrape
 ```
 
 One-shot: scrape all servers, store results, exit.

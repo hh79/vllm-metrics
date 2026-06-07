@@ -105,6 +105,7 @@ def _run_summary_query(conn, since=None, until=None, model_name=None, server_nam
             AVG(d.avg_kv_cache_pct)                     AS avg_kv_cache_pct,
             AVG(d.avg_running)                          AS avg_running,
             MAX(d.max_running)                          AS max_running,
+            AVG(d.avg_waiting)                          AS avg_waiting,
             SUM(d.num_snapshots)                        AS total_snapshots
         FROM daily_stats d
         JOIN servers s ON d.server_id = s.id
@@ -158,7 +159,12 @@ def _run_raw_summary(conn, since=None, until=None, model_name=None, server_name=
             SUM(r.num_preemptions_total)                AS total_preemptions,
             AVG(r.ttft_sum / NULLIF(r.ttft_count, 0)) * 1000 AS avg_ttft_ms,
             AVG(r.itl_sum / NULLIF(r.itl_count, 0)) * 1000   AS avg_itl_ms,
-            COUNT(*)                                        AS total_snapshots
+            AVG(r.num_requests_running)                 AS avg_running,
+            MAX(r.num_requests_running)                 AS max_running,
+            AVG(r.num_requests_waiting)                 AS avg_waiting,
+            MIN(r.timestamp)                            AS first_ts,
+            MAX(r.timestamp)                            AS last_ts,
+            COUNT(*)                                    AS total_snapshots
         FROM raw_snapshots r
         JOIN servers s ON r.server_id = s.id
         LEFT JOIN models m ON r.model_id = m.id
@@ -275,6 +281,26 @@ def generate_report(conn, since=None, until=None, model_name=None, server_name=N
             _print_row("    Requests", _fmt_number(row['total_requests']))
             _print_row("    Preemptions", _fmt_number(row['total_preemptions']))
             _print_row("    Active days", str(row['active_days']))
+
+            # Generation throughput
+            gen_tokens = row['total_gen_tokens'] or 0
+            first_ts = row.get('first_ts')
+            last_ts = row.get('last_ts')
+            if gen_tokens and first_ts and last_ts:
+                period_secs = last_ts - first_ts
+                if period_secs > 0:
+                    _print_row("    Gen throughput", f"{gen_tokens / period_secs:.1f} tok/s")
+
+            # Concurrent / waiting requests
+            avg_running = row.get('avg_running')
+            max_running = row.get('max_running')
+            avg_waiting = row.get('avg_waiting')
+            if avg_running is not None:
+                _print_row("    Avg concurrent", f"{avg_running:.1f}")
+            if max_running is not None:
+                _print_row("    Peak concurrent", f"{max_running:.0f}")
+            if avg_waiting is not None and avg_waiting > 0:
+                _print_row("    Avg waiting", f"{avg_waiting:.1f}")
 
             cached = row.get('total_cached_tokens') or 0
             if cached:

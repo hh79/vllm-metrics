@@ -56,24 +56,75 @@ CREATE TABLE IF NOT EXISTS raw_snapshots (
     mm_cache_queries_total          REAL DEFAULT 0,
     mm_cache_hits_total             REAL DEFAULT 0,
 
+    -- Speculative decoding counters
+    spec_decode_num_drafts_total        REAL DEFAULT 0,
+    spec_decode_num_draft_tokens_total  REAL DEFAULT 0,
+    spec_decode_num_accepted_tokens_total REAL DEFAULT 0,
+    spec_decode_accepted_pos_0          REAL DEFAULT 0,
+    spec_decode_accepted_pos_1          REAL DEFAULT 0,
+
+    -- External / cross-instance prefix cache
+    external_prefix_cache_queries_total REAL DEFAULT 0,
+    external_prefix_cache_hits_total    REAL DEFAULT 0,
+
+    -- MFU estimates
+    estimated_flops_per_gpu_total       REAL DEFAULT 0,
+    estimated_read_bytes_per_gpu_total  REAL DEFAULT 0,
+    estimated_write_bytes_per_gpu_total REAL DEFAULT 0,
+
+    -- Prompt tokens by source
+    prompt_tokens_by_source_local_compute     REAL DEFAULT 0,
+    prompt_tokens_by_source_local_cache_hit   REAL DEFAULT 0,
+    prompt_tokens_by_source_external_kv_transfer REAL DEFAULT 0,
+
     -- Gauges
     num_requests_running    REAL DEFAULT NULL,
     num_requests_waiting    REAL DEFAULT NULL,
     kv_cache_usage_perc     REAL DEFAULT NULL,
+    num_requests_waiting_capacity REAL DEFAULT NULL,
+    num_requests_waiting_deferred REAL DEFAULT NULL,
+    engine_awake                   REAL DEFAULT NULL,
+
+    -- Server process gauges (unlabeled)
+    server_uptime_seconds           REAL DEFAULT NULL,
+    process_resident_memory_bytes   REAL DEFAULT NULL,
+    process_virtual_memory_bytes    REAL DEFAULT NULL,
+    process_cpu_seconds_total       REAL DEFAULT NULL,
+    process_open_fds                REAL DEFAULT NULL,
 
     -- Histogram sums/counts
-    ttft_count      REAL DEFAULT NULL,
-    ttft_sum        REAL DEFAULT NULL,
-    itl_count       REAL DEFAULT NULL,
-    itl_sum         REAL DEFAULT NULL,
-    e2e_count       REAL DEFAULT NULL,
-    e2e_sum         REAL DEFAULT NULL,
-    queue_count     REAL DEFAULT NULL,
-    queue_sum       REAL DEFAULT NULL,
-    prefill_count   REAL DEFAULT NULL,
-    prefill_sum     REAL DEFAULT NULL,
-    decode_count    REAL DEFAULT NULL,
-    decode_sum      REAL DEFAULT NULL,
+    ttft_count          REAL DEFAULT NULL,
+    ttft_sum            REAL DEFAULT NULL,
+    itl_count           REAL DEFAULT NULL,
+    itl_sum             REAL DEFAULT NULL,
+    e2e_count           REAL DEFAULT NULL,
+    e2e_sum             REAL DEFAULT NULL,
+    queue_count         REAL DEFAULT NULL,
+    queue_sum           REAL DEFAULT NULL,
+    prefill_count       REAL DEFAULT NULL,
+    prefill_sum         REAL DEFAULT NULL,
+    decode_count        REAL DEFAULT NULL,
+    decode_sum          REAL DEFAULT NULL,
+
+    -- Extra histograms
+    inference_count     REAL DEFAULT NULL,
+    inference_sum       REAL DEFAULT NULL,
+    tpot_count          REAL DEFAULT NULL,
+    tpot_sum            REAL DEFAULT NULL,
+    iter_tok_count      REAL DEFAULT NULL,
+    iter_tok_sum        REAL DEFAULT NULL,
+    req_max_tok_count   REAL DEFAULT NULL,
+    req_max_tok_sum     REAL DEFAULT NULL,
+    req_params_n_count  REAL DEFAULT NULL,
+    req_params_n_sum    REAL DEFAULT NULL,
+    req_max_gen_count   REAL DEFAULT NULL,
+    req_max_gen_sum     REAL DEFAULT NULL,
+    prefill_kv_count    REAL DEFAULT NULL,
+    prefill_kv_sum      REAL DEFAULT NULL,
+    req_prompt_count    REAL DEFAULT NULL,
+    req_prompt_sum      REAL DEFAULT NULL,
+    req_gen_count       REAL DEFAULT NULL,
+    req_gen_sum         REAL DEFAULT NULL,
 
     FOREIGN KEY (server_id) REFERENCES servers(id),
     FOREIGN KEY (model_id) REFERENCES models(id)
@@ -145,12 +196,56 @@ def get_db_path(path: str | None = None) -> str:
     return os.path.expanduser('~/.vllm-metrics.db')
 
 
+def _migrate_schema(conn: sqlite3.Connection):
+    """Add new columns that may not exist in databases created by older versions."""
+    new_columns = [
+        'spec_decode_num_drafts_total',
+        'spec_decode_num_draft_tokens_total',
+        'spec_decode_num_accepted_tokens_total',
+        'spec_decode_accepted_pos_0',
+        'spec_decode_accepted_pos_1',
+        'external_prefix_cache_queries_total',
+        'external_prefix_cache_hits_total',
+        'estimated_flops_per_gpu_total',
+        'estimated_read_bytes_per_gpu_total',
+        'estimated_write_bytes_per_gpu_total',
+        'prompt_tokens_by_source_local_compute',
+        'prompt_tokens_by_source_local_cache_hit',
+        'prompt_tokens_by_source_external_kv_transfer',
+        'num_requests_waiting_capacity',
+        'num_requests_waiting_deferred',
+        'engine_awake',
+        'server_uptime_seconds',
+        'process_resident_memory_bytes',
+        'process_virtual_memory_bytes',
+        'process_cpu_seconds_total',
+        'process_open_fds',
+        'inference_count', 'inference_sum',
+        'tpot_count', 'tpot_sum',
+        'iter_tok_count', 'iter_tok_sum',
+        'req_max_tok_count', 'req_max_tok_sum',
+        'req_params_n_count', 'req_params_n_sum',
+        'req_max_gen_count', 'req_max_gen_sum',
+        'prefill_kv_count', 'prefill_kv_sum',
+        'req_prompt_count', 'req_prompt_sum',
+        'req_gen_count', 'req_gen_sum',
+    ]
+    cursor = conn.cursor()
+    for col in new_columns:
+        try:
+            cursor.execute(f'ALTER TABLE raw_snapshots ADD COLUMN {col} REAL DEFAULT NULL')
+        except sqlite3.OperationalError:
+            pass  # column already exists
+    conn.commit()
+
+
 def connect(db_path: str) -> sqlite3.Connection:
     """Open or create the database with schema."""
     os.makedirs(os.path.dirname(db_path) or '.', exist_ok=True)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    _migrate_schema(conn)
     conn.commit()
     return conn
 
@@ -222,16 +317,42 @@ def store_snapshot(
         'vllm:generation_tokens_total': 'generation_tokens_total',
         'vllm:prompt_tokens_cached_total': 'prompt_tokens_cached_total',
         'vllm:request_success_total': 'request_success_total',
-        'vllm:request_prompt_tokens_total': 'request_prompt_tokens_total',
-        'vllm:request_generation_tokens_total': 'request_generation_tokens_total',
         'vllm:num_preemptions_total': 'num_preemptions_total',
         'vllm:prefix_cache_queries_total': 'prefix_cache_queries_total',
         'vllm:prefix_cache_hits_total': 'prefix_cache_hits_total',
         'vllm:mm_cache_queries_total': 'mm_cache_queries_total',
         'vllm:mm_cache_hits_total': 'mm_cache_hits_total',
+        # Speculative decoding
+        'vllm:spec_decode_num_drafts_total': 'spec_decode_num_drafts_total',
+        'vllm:spec_decode_num_draft_tokens_total': 'spec_decode_num_draft_tokens_total',
+        'vllm:spec_decode_num_accepted_tokens_total': 'spec_decode_num_accepted_tokens_total',
+        'vllm:spec_decode_accepted_pos_0': 'spec_decode_accepted_pos_0',
+        'vllm:spec_decode_accepted_pos_1': 'spec_decode_accepted_pos_1',
+        # External prefix cache
+        'vllm:external_prefix_cache_queries_total': 'external_prefix_cache_queries_total',
+        'vllm:external_prefix_cache_hits_total': 'external_prefix_cache_hits_total',
+        # MFU estimates
+        'vllm:estimated_flops_per_gpu_total': 'estimated_flops_per_gpu_total',
+        'vllm:estimated_read_bytes_per_gpu_total': 'estimated_read_bytes_per_gpu_total',
+        'vllm:estimated_write_bytes_per_gpu_total': 'estimated_write_bytes_per_gpu_total',
+        # Prompt tokens by source
+        'vllm:prompt_tokens_by_source_local_compute': 'prompt_tokens_by_source_local_compute',
+        'vllm:prompt_tokens_by_source_local_cache_hit': 'prompt_tokens_by_source_local_cache_hit',
+        'vllm:prompt_tokens_by_source_external_kv_transfer': 'prompt_tokens_by_source_external_kv_transfer',
+        # Gauges
         'vllm:num_requests_running': 'num_requests_running',
         'vllm:num_requests_waiting': 'num_requests_waiting',
         'vllm:kv_cache_usage_perc': 'kv_cache_usage_perc',
+        'vllm:num_requests_waiting_capacity': 'num_requests_waiting_capacity',
+        'vllm:num_requests_waiting_deferred': 'num_requests_waiting_deferred',
+        'vllm:engine_awake': 'engine_awake',
+        # Server process info
+        'server_uptime_seconds': 'server_uptime_seconds',
+        'process_resident_memory_bytes': 'process_resident_memory_bytes',
+        'process_virtual_memory_bytes': 'process_virtual_memory_bytes',
+        'process_cpu_seconds_total': 'process_cpu_seconds_total',
+        'process_open_fds': 'process_open_fds',
+        # Histograms: core
         'vllm:time_to_first_token_seconds_count': 'ttft_count',
         'vllm:time_to_first_token_seconds_sum': 'ttft_sum',
         'vllm:inter_token_latency_seconds_count': 'itl_count',
@@ -244,6 +365,25 @@ def store_snapshot(
         'vllm:request_prefill_time_seconds_sum': 'prefill_sum',
         'vllm:request_decode_time_seconds_count': 'decode_count',
         'vllm:request_decode_time_seconds_sum': 'decode_sum',
+        # Histograms: extra
+        'vllm:request_inference_time_seconds_count': 'inference_count',
+        'vllm:request_inference_time_seconds_sum': 'inference_sum',
+        'vllm:request_time_per_output_token_seconds_count': 'tpot_count',
+        'vllm:request_time_per_output_token_seconds_sum': 'tpot_sum',
+        'vllm:iteration_tokens_total_count': 'iter_tok_count',
+        'vllm:iteration_tokens_total_sum': 'iter_tok_sum',
+        'vllm:request_params_max_tokens_count': 'req_max_tok_count',
+        'vllm:request_params_max_tokens_sum': 'req_max_tok_sum',
+        'vllm:request_params_n_count': 'req_params_n_count',
+        'vllm:request_params_n_sum': 'req_params_n_sum',
+        'vllm:request_max_num_generation_tokens_count': 'req_max_gen_count',
+        'vllm:request_max_num_generation_tokens_sum': 'req_max_gen_sum',
+        'vllm:request_prefill_kv_computed_tokens_count': 'prefill_kv_count',
+        'vllm:request_prefill_kv_computed_tokens_sum': 'prefill_kv_sum',
+        'vllm:request_prompt_tokens_count': 'req_prompt_count',
+        'vllm:request_prompt_tokens_sum': 'req_prompt_sum',
+        'vllm:request_generation_tokens_count': 'req_gen_count',
+        'vllm:request_generation_tokens_sum': 'req_gen_sum',
     }
 
     cols = ['server_id', 'model_id', 'timestamp', 'timestring']

@@ -96,7 +96,7 @@ def run_once(conn, config: dict, failed_servers: set | None = None):
             model_id = upsert_model(conn, server_id, model_name)
 
             # Extract current cumulative scalar stats
-            current_stats = extract_model_stats(samples)
+            current_stats = extract_model_stats(samples, result.raw_timestamp)
 
             # Get last known cumulative values for delta computation
             last_vals = get_last_values(conn, server_id, model_id)
@@ -118,7 +118,7 @@ def run_once(conn, config: dict, failed_servers: set | None = None):
 
         # Also store unlabeled samples
         if result.unlabeled:
-            unlabeled_stats = extract_model_stats(result.unlabeled)
+            unlabeled_stats = extract_model_stats(result.unlabeled, result.raw_timestamp)
             last_vals = get_last_values(conn, server_id, None)
             deltas = compute_deltas(unlabeled_stats, last_vals) if last_vals else {}
             save_last_values(conn, server_id, None, unlabeled_stats)

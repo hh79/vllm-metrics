@@ -164,7 +164,20 @@ def _run_raw_summary(conn, since=None, until=None, model_name=None, server_name=
             AVG(r.num_requests_waiting)                 AS avg_waiting,
             MIN(r.timestamp)                            AS first_ts,
             MAX(r.timestamp)                            AS last_ts,
-            COUNT(*)                                    AS total_snapshots
+            COUNT(*)                                    AS total_snapshots,
+            SUM(CASE WHEN r.generation_tokens_total > 0 THEN 1 ELSE 0 END) AS active_snapshots,
+            (
+                SELECT AVG(sub.rate) FROM (
+                    SELECT r2.generation_tokens_total /
+                        MAX(NULLIF(r2.timestamp - LAG(r2.timestamp)
+                            OVER (PARTITION BY r2.server_id, r2.model_id ORDER BY r2.timestamp), 0), 1)
+                        AS rate
+                    FROM raw_snapshots r2
+                    WHERE r2.server_id = r.server_id AND r2.model_id = r.model_id
+                      AND r2.generation_tokens_total > 0
+                ) sub
+                WHERE sub.rate BETWEEN 0.1 AND 500
+            ) AS avg_gen_rate
         FROM raw_snapshots r
         JOIN servers s ON r.server_id = s.id
         LEFT JOIN models m ON r.model_id = m.id
@@ -282,14 +295,13 @@ def generate_report(conn, since=None, until=None, model_name=None, server_name=N
             _print_row("    Preemptions", _fmt_number(row['total_preemptions']))
             _print_row("    Active days", str(row['active_days']))
 
-            # Generation throughput
+            # Generation throughput (per-snapshot rate, gap-tolerant)
+            gen_rate = row.get('avg_gen_rate')
             gen_tokens = row['total_gen_tokens'] or 0
-            first_ts = row.get('first_ts')
-            last_ts = row.get('last_ts')
-            if gen_tokens and first_ts and last_ts:
-                period_secs = last_ts - first_ts
-                if period_secs > 0:
-                    _print_row("    Gen throughput", f"{gen_tokens / period_secs:.1f} tok/s")
+            if gen_rate and gen_rate > 0:
+                _print_row("    Gen throughput", f"{gen_rate:.1f} tok/s")
+            elif gen_tokens:
+                _print_row("    Gen throughput", f"{gen_tokens / 3600:.1f} tok/s (approx)")
 
             # Concurrent / waiting requests
             avg_running = row.get('avg_running')

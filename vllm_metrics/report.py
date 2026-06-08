@@ -120,17 +120,11 @@ def _run_summary_query(conn, since=None, until=None, model_name=None, server_nam
 
 def _run_raw_summary(conn, since=None, until=None, model_name=None, server_name=None):
     """
-    Fallback: query raw_snapshots directly (for data that hasn't been rolled up yet).
+    Query raw_snapshots directly with time-weighted averages.
     """
     conditions = []
     params = []
 
-    tc, tp = _build_time_clause(conn, since, until, 'r', 'timestring')
-    # For raw, the date column is 'timestring' (ISO text)
-    conditions = [f"DATE(r.timestring) >= ?" if 'timestring' in str(c) else c for c in tc]
-    # Actually let me just rebuild properly
-    conditions = []
-    params = []
     if since:
         conditions.append("DATE(r.timestring) >= ?")
         params.append(since.isoformat() if hasattr(since, 'isoformat') else since)
@@ -145,6 +139,16 @@ def _run_raw_summary(conn, since=None, until=None, model_name=None, server_name=
         params.append(server_name)
 
     where = ' AND '.join(conditions) if conditions else '1'
+
+    # Compute epoch bounds for subquery date filtering
+    epoch_since = '0'
+    epoch_until = '9999999999'
+    if since:
+        d = since if not isinstance(since, str) else datetime.fromisoformat(since).date()
+        epoch_since = str(int(datetime.combine(d, datetime.min.time()).timestamp()))
+    if until:
+        d = until if not isinstance(until, str) else datetime.fromisoformat(until).date()
+        epoch_until = str(int(datetime.combine(d, datetime.max.time()).timestamp()))
 
     cursor = conn.cursor()
     cursor.execute(f"""
@@ -179,6 +183,8 @@ def _run_raw_summary(conn, since=None, until=None, model_name=None, server_name=
                     FROM raw_snapshots r2
                     WHERE r2.server_id = r.server_id
                       AND r2.model_id = r.model_id
+                      AND r2.timestamp >= {epoch_since}
+                      AND r2.timestamp <= {epoch_until}
                 ) sub
             ) AS avg_running,
             (
@@ -196,19 +202,24 @@ def _run_raw_summary(conn, since=None, until=None, model_name=None, server_name=
                     FROM raw_snapshots r2
                     WHERE r2.server_id = r.server_id
                       AND r2.model_id = r.model_id
+                      AND r2.timestamp >= {epoch_since}
+                      AND r2.timestamp <= {epoch_until}
                 ) sub
             ) AS avg_waiting,
             (
                 SELECT AVG(sub.rate) FROM (
                     SELECT r2.generation_tokens_total /
-                        MAX(NULLIF(r2.timestamp - LAG(r2.timestamp)
-                            OVER (PARTITION BY r2.server_id, r2.model_id ORDER BY r2.timestamp), 0), 1)
+                        NULLIF(r2.timestamp - LAG(r2.timestamp)
+                            OVER (PARTITION BY r2.server_id, r2.model_id
+                                  ORDER BY r2.timestamp), 0)
                         AS rate
                     FROM raw_snapshots r2
                     WHERE r2.server_id = r.server_id AND r2.model_id = r.model_id
                       AND r2.generation_tokens_total > 0
+                      AND r2.timestamp >= {epoch_since}
+                      AND r2.timestamp <= {epoch_until}
                 ) sub
-                WHERE sub.rate BETWEEN 0.1 AND 500
+                WHERE sub.rate BETWEEN 0.1 AND 10000
             ) AS avg_gen_rate
         FROM raw_snapshots r
         JOIN servers s ON r.server_id = s.id
@@ -247,11 +258,11 @@ def generate_report(conn, since=None, until=None, model_name=None, server_name=N
     else:
         period += f"  to  {datetime.now(timezone.utc).date()}"
 
-    # Query daily stats first
-    rows = _run_summary_query(conn, since=since, until=until, model_name=model_name, server_name=server_name)
+    # Query raw snapshots first (live data, time-weighted averages)
+    rows = _run_raw_summary(conn, since=since, until=until, model_name=model_name, server_name=server_name)
     if not rows:
-        # Try raw snapshots
-        rows = _run_raw_summary(conn, since=since, until=until, model_name=model_name, server_name=server_name)
+        # Fall back to daily_stats (rolled up data for longer ranges)
+        rows = _run_summary_query(conn, since=since, until=until, model_name=model_name, server_name=server_name)
 
     # Calculate totals across all rows
     totals = {

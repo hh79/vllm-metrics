@@ -53,7 +53,7 @@ message is user-friendly. The rest of the codebase must use only Python stdlib
 ### Dual tables for long-term storage
 
 Raw per-scrape deltas are stored in `raw_snapshots` indefinitely (or until pruned
-by manual `vllm-metrics rollup`). A daily rollup aggregates them into `daily_stats`
+by manual `vllm-metrics prune`). A daily rollup aggregates them into `daily_stats`
 (SUM of deltas, AVG of gauges) for year-scale queries. Rollup is manual.
 
 Located in: `vllm_metrics/db.py` → `rollup_and_prune()`, `compute_daily_rollup()`

@@ -11,7 +11,7 @@ Usage:
   vllm-metrics report --model MODEL    Filter by model name
   vllm-metrics report --server NAME    Filter by server name
   vllm-metrics report --days 30        Last N days
-  vllm-metrics rollup                  Aggregate raw snapshots into daily_stats
+  vllm-metrics prune                  Aggregate raw snapshots into daily_stats
   vllm-metrics servers                 List configured and discovered servers
   vllm-metrics models                  List all tracked models
 """
@@ -80,8 +80,8 @@ def cmd_report(args):
     )
 
 
-def cmd_rollup(args):
-    """Manual daily rollup: aggregate raw snapshots into daily_stats."""
+def cmd_prune(args):
+    """Manual rollup: aggregate raw snapshots into daily_stats."""
     config = load_config(args.config)
     db_path = get_db_path(config.get('database', '~/.vllm-metrics.db'))
     conn = connect(db_path)
@@ -175,8 +175,8 @@ def main():
     # models
     sub.add_parser('models', help='List tracked models')
 
-    # rollup
-    sub.add_parser('rollup', help='Aggregate raw snapshots into daily_stats (manual)')
+    # prune
+    sub.add_parser('prune', help='Roll up raw snapshots into daily_stats + prune old data')
 
     args = parser.parse_args()
 
@@ -190,8 +190,8 @@ def main():
         cmd_servers(args)
     elif args.command == 'models':
         cmd_models(args)
-    elif args.command == 'rollup':
-        cmd_rollup(args)
+    elif args.command == 'prune':
+        cmd_prune(args)
 
 
 if __name__ == '__main__':

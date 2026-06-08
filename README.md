@@ -57,7 +57,7 @@ systemctl --user start vllm-metrics
 Each vLLM server exposes `/metrics` (Prometheus format) with counters and histograms
 labelled by `model_name` and `engine`. The scraper reads these, groups them per model,
 computes **incremental deltas** (never stores raw cumulative values), and writes to a
-local SQLite database. Raw data is kept indefinitely; run `vllm-metrics rollup` to
+local SQLite database. Raw data is kept indefinitely; run `vllm-metrics prune` to
 aggregate completed days into daily summaries.
 
 ## Commands
@@ -83,10 +83,10 @@ One-shot: scrape all servers, store results, exit.
 - On first run, each server+model pair is recorded as a **baseline** (no delta yet).
 - On second run, deltas are computed from the baseline.
 
-### `rollup`
+### `prune`
 
 ```bash
-./vllm-metrics rollup
+./vllm-metrics prune
 ```
 
 Manually aggregate raw snapshots into `daily_stats` for completed dates (yesterday
@@ -196,7 +196,7 @@ servers:
 
 interval: 60                 # scrape every 60 seconds
 database: ~/.vllm-metrics.db
-raw_retention_days: 90       # raw data pruned after rollup
+raw_retention_days: 0       # set > 0 to prune raw data after prune run
 ```
 
 ## Database Schema
@@ -211,7 +211,7 @@ File: `~/.vllm-metrics.db`
 | `daily_stats` | Pre-aggregated daily rows (SUM of deltas, AVG of gauges/histograms). Kept forever for year-scale queries. |
 | `last_values` | Last-seen cumulative counter values (the baseline for next delta computation) |
 
-Rollup happens manually via `vllm-metrics rollup`. It:
+Rollup happens manually via `vllm-metrics prune`. It:
 1. SELECTs all raw_snapshots for each completed date
 2. SUMs the deltas into a daily_stats row
 3. If `raw_retention_days > 0`, DELETEs raw_snapshots older than that threshold

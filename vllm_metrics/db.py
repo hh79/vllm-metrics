@@ -259,15 +259,21 @@ def upsert_server(conn: sqlite3.Connection, name: str, url: str, notes: str = ''
     cursor = conn.cursor()
     cursor.execute("""
         INSERT INTO servers (name, url, notes, added_at, last_seen)
-        VALUES (?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, NULL)
         ON CONFLICT(name) DO UPDATE SET
             url = excluded.url,
-            notes = COALESCE(NULLIF(excluded.notes, ''), servers.notes),
-            last_seen = excluded.last_seen
-    """, (name, url, notes, now, now))
+            notes = COALESCE(NULLIF(excluded.notes, ''), servers.notes)
+    """, (name, url, notes, now))
     conn.commit()
     cursor.execute("SELECT id FROM servers WHERE name = ?", (name,))
     return cursor.fetchone()[0]
+
+
+def update_last_seen(conn: sqlite3.Connection, server_id: int):
+    """Mark a server as successfully scraped (updates last_seen timestamp)."""
+    now = time.time()
+    conn.execute("UPDATE servers SET last_seen = ? WHERE id = ?", (now, server_id))
+    conn.commit()
 
 
 def get_servers(conn: sqlite3.Connection) -> list[dict]:

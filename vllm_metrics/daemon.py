@@ -19,7 +19,7 @@ except ImportError:
 from .scraper import scrape_server, extract_model_stats, compute_deltas
 from .db import (
     connect, get_db_path,
-    upsert_server, get_servers, upsert_model,
+    upsert_server, update_last_seen, get_servers, upsert_model,
     store_snapshot, get_last_values, save_last_values,
     rollup_and_prune,
 )
@@ -83,6 +83,9 @@ def run_once(conn, config: dict, failed_servers: set | None = None):
             else:
                 print(f"  [FAIL] {name} ({url}): {result.error}")
             continue
+
+        # Mark as online
+        update_last_seen(conn, server_id)
 
         # Server came back after failures
         if failed_servers is not None and name in failed_servers:

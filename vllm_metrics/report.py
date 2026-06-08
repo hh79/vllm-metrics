@@ -9,6 +9,27 @@ over arbitrary time ranges (day, week, month, year, custom).
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 from collections import defaultdict
+import time as _time
+
+
+def _fmt_s(seconds: float | None) -> str:
+    if seconds is None:
+        return '--'
+    if seconds < 1:
+        return f'{seconds*1000:.0f}ms'
+    return f'{seconds:.1f}s'
+
+
+def _fmt_decimal(n: float) -> str:
+    if n >= 100:
+        return f'{n:.0f}'
+    if n >= 1:
+        return f'{n:.1f}'
+    if n >= 0.01:
+        return f'{n:.2f}'
+    if n >= 0.001:
+        return f'{n:.3f}'
+    return f'~{n:.2g}'
 
 
 def _fmt_number(n: float | None) -> str:
@@ -140,15 +161,98 @@ def _run_raw_summary(conn, since=None, until=None, model_name=None, server_name=
 
     where = ' AND '.join(conditions) if conditions else '1'
 
-    # Compute epoch bounds for subquery date filtering
-    epoch_since = '0'
-    epoch_until = '9999999999'
-    if since:
-        d = since if not isinstance(since, str) else datetime.fromisoformat(since).date()
-        epoch_since = str(int(datetime.combine(d, datetime.min.time()).timestamp()))
-    if until:
-        d = until if not isinstance(until, str) else datetime.fromisoformat(until).date()
-        epoch_until = str(int(datetime.combine(d, datetime.max.time()).timestamp()))
+    cursor = conn.cursor()
+
+    # Fetch the raw snapshot timeseries for time-weighted avg computation
+    # Grouped by (server_id, model_id) for later Python-side processing
+    cursor.execute(f"""
+        SELECT
+            r.server_id,
+            r.model_id,
+            r.timestamp,
+            r.num_requests_running,
+            r.num_requests_waiting,
+            r.generation_tokens_total
+        FROM raw_snapshots r
+        JOIN servers s ON r.server_id = s.id
+        LEFT JOIN models m ON r.model_id = m.id
+        WHERE {where} AND m.model_name IS NOT NULL
+        ORDER BY r.server_id, r.model_id, r.timestamp
+    """, params)
+    rows = cursor.fetchall()
+
+    # Group rows by (server_id, model_id) for per-group processing
+    groups = {}
+    for row in rows:
+        key = (row['server_id'], row['model_id'])
+        groups.setdefault(key, []).append(row)
+
+    # Compute time-weighted averages per group (active-only: exclude idle gaps)
+    tw_avg = {}  # key -> {'avg_running': ..., 'avg_waiting': ...}
+    for key, snapshots in groups.items():
+        n = len(snapshots)
+        if n == 0:
+            tw_avg[key] = {'avg_running': None, 'avg_waiting': None}
+            continue
+
+        # Find active snapshots (those with running > 0)
+        active_indices = [i for i in range(n)
+                          if snapshots[i]['num_requests_running'] is not None
+                          and snapshots[i]['num_requests_running'] > 0]
+        if not active_indices:
+            tw_avg[key] = {'avg_running': 0.0, 'avg_waiting': 0.0}
+            continue
+
+        # Build "active clusters" — merge consecutive snapshot durations
+        # where running > 0, treating intervening idle gaps as breaks between
+        # separate active periods (excluded from the average).
+        total_weight = 0.0
+        weighted_running = 0.0
+        weighted_waiting = 0.0
+
+        # Generation throughput: average rate between consecutive gen-producing snapshots
+        gen_rates = []
+
+        # Walk through each active snapshot and its duration (until next snapshot)
+        for i in range(n):
+            running = snapshots[i]['num_requests_running']
+            if running is None or running <= 0:
+                continue
+
+            waiting = snapshots[i]['num_requests_waiting']
+            ts = snapshots[i]['timestamp']
+            # Duration: until next snapshot (any running state)
+            if i + 1 < n:
+                duration = snapshots[i + 1]['timestamp'] - ts
+            else:
+                duration = 60.0  # assume one interval for last snapshot
+
+            if duration <= 0:
+                continue
+            total_weight += duration
+            weighted_running += running * duration
+            if waiting is not None:
+                weighted_waiting += waiting * duration
+
+        # Compute gen rate from consecutive snapshots with gen tokens
+        gen_rows = [(i, snapshots[i]) for i in range(n)
+                     if snapshots[i]['generation_tokens_total'] is not None
+                     and snapshots[i]['generation_tokens_total'] > 0]
+        for j in range(1, len(gen_rows)):
+            prev = gen_rows[j - 1][1]
+            cur = gen_rows[j][1]
+            dt = cur['timestamp'] - prev['timestamp']
+            gen_delta = cur['generation_tokens_total']
+            if dt > 0 and gen_delta > 0:
+                rate = gen_delta / dt
+                if 0.1 <= rate <= 10000:
+                    gen_rates.append(rate)
+
+        tw_avg[key] = {
+            'avg_running': weighted_running / total_weight if total_weight > 0 else 0.0,
+            'avg_waiting': weighted_waiting / total_weight if total_weight > 0 else 0.0,
+            'avg_gen_rate': sum(gen_rates) / len(gen_rates) if gen_rates else None,
+        }
 
     cursor = conn.cursor()
     cursor.execute(f"""
@@ -167,60 +271,7 @@ def _run_raw_summary(conn, since=None, until=None, model_name=None, server_name=
             MIN(r.timestamp)                            AS first_ts,
             MAX(r.timestamp)                            AS last_ts,
             COUNT(*)                                    AS total_snapshots,
-            SUM(CASE WHEN r.generation_tokens_total > 0 THEN 1 ELSE 0 END) AS active_snapshots,
-            (
-                SELECT SUM(sub.running * sub.duration) * 1.0
-                     / NULLIF(SUM(sub.duration), 0)
-                FROM (
-                    SELECT
-                        r2.num_requests_running AS running,
-                        COALESCE(
-                            LEAD(r2.timestamp)
-                                OVER (PARTITION BY r2.server_id, r2.model_id
-                                      ORDER BY r2.timestamp),
-                            r2.timestamp
-                        ) - r2.timestamp AS duration
-                    FROM raw_snapshots r2
-                    WHERE r2.server_id = r.server_id
-                      AND r2.model_id = r.model_id
-                      AND r2.timestamp >= {epoch_since}
-                      AND r2.timestamp <= {epoch_until}
-                ) sub
-            ) AS avg_running,
-            (
-                SELECT SUM(sub.waiting * sub.duration) * 1.0
-                     / NULLIF(SUM(sub.duration), 0)
-                FROM (
-                    SELECT
-                        r2.num_requests_waiting AS waiting,
-                        COALESCE(
-                            LEAD(r2.timestamp)
-                                OVER (PARTITION BY r2.server_id, r2.model_id
-                                      ORDER BY r2.timestamp),
-                            r2.timestamp
-                        ) - r2.timestamp AS duration
-                    FROM raw_snapshots r2
-                    WHERE r2.server_id = r.server_id
-                      AND r2.model_id = r.model_id
-                      AND r2.timestamp >= {epoch_since}
-                      AND r2.timestamp <= {epoch_until}
-                ) sub
-            ) AS avg_waiting,
-            (
-                SELECT AVG(sub.rate) FROM (
-                    SELECT r2.generation_tokens_total /
-                        NULLIF(r2.timestamp - LAG(r2.timestamp)
-                            OVER (PARTITION BY r2.server_id, r2.model_id
-                                  ORDER BY r2.timestamp), 0)
-                        AS rate
-                    FROM raw_snapshots r2
-                    WHERE r2.server_id = r.server_id AND r2.model_id = r.model_id
-                      AND r2.generation_tokens_total > 0
-                      AND r2.timestamp >= {epoch_since}
-                      AND r2.timestamp <= {epoch_until}
-                ) sub
-                WHERE sub.rate BETWEEN 0.1 AND 10000
-            ) AS avg_gen_rate
+            SUM(CASE WHEN r.generation_tokens_total > 0 THEN 1 ELSE 0 END) AS active_snapshots
         FROM raw_snapshots r
         JOIN servers s ON r.server_id = s.id
         LEFT JOIN models m ON r.model_id = m.id
@@ -229,7 +280,24 @@ def _run_raw_summary(conn, since=None, until=None, model_name=None, server_name=
         HAVING m.model_name IS NOT NULL
         ORDER BY s.name, m.model_name
     """, params)
-    return [dict(row) for row in cursor.fetchall()]
+    results = [dict(row) for row in cursor.fetchall()]
+
+    # Merge Python-computed time-weighted averages into results
+    for row in results:
+        cursor2 = conn.cursor()
+        cursor2.execute("SELECT id FROM servers WHERE name = ?", (row['server_name'],))
+        srow = cursor2.fetchone()
+        cursor2.execute("SELECT id FROM models WHERE model_name = ? AND server_id = ?",
+                        (row['model_name'], srow['id']))
+        mrow = cursor2.fetchone()
+        if srow and mrow:
+            key = (srow['id'], mrow['id'])
+            tw = tw_avg.get(key, {})
+            row['avg_running'] = tw.get('avg_running')
+            row['avg_waiting'] = tw.get('avg_waiting')
+            row['avg_gen_rate'] = tw.get('avg_gen_rate')
+
+    return results
 
 
 def _print_separator(char='='):
@@ -351,7 +419,7 @@ def generate_report(conn, since=None, until=None, model_name=None, server_name=N
             max_running = row.get('max_running')
             avg_waiting = row.get('avg_waiting')
             if avg_running is not None:
-                _print_row("    Avg concurrent", f"{avg_running:.1f}")
+                _print_row("    Avg concurrent", _fmt_decimal(avg_running))
             if max_running is not None:
                 _print_row("    Peak concurrent", f"{max_running:.0f}")
             if avg_waiting is not None and avg_waiting > 0:
@@ -381,31 +449,41 @@ def generate_report(conn, since=None, until=None, model_name=None, server_name=N
     print("  SERVER STATS")
     _print_separator('-')
 
+    stale_threshold = 300  # 5 min without a successful scrape = offline
+
     cursor = conn.cursor()
     cursor.execute("""
         SELECT
             s.name,
+            s.last_seen,
             r.server_uptime_seconds,
             r.process_resident_memory_bytes,
             r.process_virtual_memory_bytes,
             r.process_cpu_seconds_total,
             r.process_open_fds,
             r.timestring
-        FROM raw_snapshots r
-        JOIN servers s ON r.server_id = s.id
-        WHERE r.model_id IS NULL
-          AND r.timestamp = (
-              SELECT MAX(r2.timestamp)
-              FROM raw_snapshots r2
-              WHERE r2.server_id = r.server_id AND r2.model_id IS NULL
-          )
+        FROM servers s
+        LEFT JOIN raw_snapshots r ON r.server_id = s.id
+            AND r.model_id IS NULL
+            AND r.timestamp = (
+                SELECT MAX(r2.timestamp)
+                FROM raw_snapshots r2
+                WHERE r2.server_id = r.server_id AND r2.model_id IS NULL
+            )
         ORDER BY s.name
     """)
 
     server_rows = cursor.fetchall()
     if server_rows:
+        now_ts = _time.time()
         for row in server_rows:
             print(f"  [{row['name']}]")
+            last_seen = row['last_seen']
+            is_offline = last_seen is None or (now_ts - last_seen) > stale_threshold
+            if is_offline:
+                print("    Server unavailable")
+                print()
+                continue
             uptime = row['server_uptime_seconds']
             if uptime:
                 days = int(uptime // 86400)
@@ -429,7 +507,7 @@ def generate_report(conn, since=None, until=None, model_name=None, server_name=N
                 _print_row("    Open FDs", f"{int(fds)}")
             print()
     else:
-        print("  (no server stats collected yet)")
+        print("  (no servers configured yet)")
     print()
 
     # =====================================================

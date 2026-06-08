@@ -159,13 +159,45 @@ def _run_raw_summary(conn, since=None, until=None, model_name=None, server_name=
             SUM(r.num_preemptions_total)                AS total_preemptions,
             AVG(r.ttft_sum / NULLIF(r.ttft_count, 0)) * 1000 AS avg_ttft_ms,
             AVG(r.itl_sum / NULLIF(r.itl_count, 0)) * 1000   AS avg_itl_ms,
-            AVG(r.num_requests_running)                 AS avg_running,
             MAX(r.num_requests_running)                 AS max_running,
-            AVG(r.num_requests_waiting)                 AS avg_waiting,
             MIN(r.timestamp)                            AS first_ts,
             MAX(r.timestamp)                            AS last_ts,
             COUNT(*)                                    AS total_snapshots,
             SUM(CASE WHEN r.generation_tokens_total > 0 THEN 1 ELSE 0 END) AS active_snapshots,
+            (
+                SELECT SUM(sub.running * sub.duration) * 1.0
+                     / NULLIF(SUM(sub.duration), 0)
+                FROM (
+                    SELECT
+                        r2.num_requests_running AS running,
+                        COALESCE(
+                            LEAD(r2.timestamp)
+                                OVER (PARTITION BY r2.server_id, r2.model_id
+                                      ORDER BY r2.timestamp),
+                            r2.timestamp
+                        ) - r2.timestamp AS duration
+                    FROM raw_snapshots r2
+                    WHERE r2.server_id = r.server_id
+                      AND r2.model_id = r.model_id
+                ) sub
+            ) AS avg_running,
+            (
+                SELECT SUM(sub.waiting * sub.duration) * 1.0
+                     / NULLIF(SUM(sub.duration), 0)
+                FROM (
+                    SELECT
+                        r2.num_requests_waiting AS waiting,
+                        COALESCE(
+                            LEAD(r2.timestamp)
+                                OVER (PARTITION BY r2.server_id, r2.model_id
+                                      ORDER BY r2.timestamp),
+                            r2.timestamp
+                        ) - r2.timestamp AS duration
+                    FROM raw_snapshots r2
+                    WHERE r2.server_id = r.server_id
+                      AND r2.model_id = r.model_id
+                ) sub
+            ) AS avg_waiting,
             (
                 SELECT AVG(sub.rate) FROM (
                     SELECT r2.generation_tokens_total /

@@ -456,7 +456,24 @@ def compute_daily_rollup(conn: sqlite3.Connection, date_str: str):
             SUM(r.prompt_tokens_cached_total)                      AS prompt_tokens_cached,
             SUM(r.request_success_total)                           AS completed_requests,
             SUM(r.num_preemptions_total)                           AS preemptions,
-            AVG(r.num_requests_running)    AS avg_running,
+            (
+                SELECT SUM(tw.running * tw.duration) * 1.0
+                     / NULLIF(SUM(tw.duration), 0)
+                FROM (
+                    SELECT
+                        r2.num_requests_running AS running,
+                        COALESCE(
+                            LEAD(r2.timestamp)
+                                OVER (PARTITION BY r2.server_id, r2.model_id
+                                      ORDER BY r2.timestamp),
+                            strftime('%%s', ? || ' 23:59:59')
+                        ) - r2.timestamp AS duration
+                    FROM raw_snapshots r2
+                    WHERE DATE(r2.timestring) = ?
+                      AND r2.server_id = r.server_id
+                      AND r2.model_id = r.model_id
+                ) tw
+            ) AS avg_running,
             MIN(r.num_requests_running)    AS min_running,
             MAX(r.num_requests_running)    AS max_running,
             AVG(r.num_requests_waiting)    AS avg_waiting,
@@ -470,7 +487,7 @@ def compute_daily_rollup(conn: sqlite3.Connection, date_str: str):
         FROM raw_snapshots r
         WHERE DATE(r.timestring) = ?
         GROUP BY r.server_id, r.model_id
-    """, (date_str,))
+    """, (date_str, date_str, date_str))
 
     rows = cursor.fetchall()
     if not rows:

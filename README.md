@@ -57,7 +57,8 @@ systemctl --user start vllm-metrics
 Each vLLM server exposes `/metrics` (Prometheus format) with counters and histograms
 labelled by `model_name` and `engine`. The scraper reads these, groups them per model,
 computes **incremental deltas** (never stores raw cumulative values), and writes to a
-local SQLite database. Old raw data is rolled up into daily summaries and pruned.
+local SQLite database. Raw data is kept indefinitely; run `vllm-metrics rollup` to
+aggregate completed days into daily summaries.
 
 ## Commands
 
@@ -70,7 +71,6 @@ local SQLite database. Old raw data is rolled up into daily summaries and pruned
 
 Runs continuously, scraping every `interval` seconds (default: 60).
 - Failed servers are reported once then silenced until they recover.
-- Daily rollup runs automatically after midnight.
 - Server restarts (counter resets) are detected and handled transparently.
 
 ### `scrape`
@@ -82,6 +82,19 @@ Runs continuously, scraping every `interval` seconds (default: 60).
 One-shot: scrape all servers, store results, exit.
 - On first run, each server+model pair is recorded as a **baseline** (no delta yet).
 - On second run, deltas are computed from the baseline.
+
+### `rollup`
+
+```bash
+./vllm-metrics rollup
+```
+
+Manually aggregate raw snapshots into `daily_stats` for completed dates (yesterday
+and earlier). Also prunes raw snapshots older than `raw_retention_days` if set (default:
+0 = keep forever).
+
+Run this periodically (e.g., weekly cron) if you want daily summaries without keeping
+all raw data. Otherwise raw data is kept indefinitely.
 
 ### `report`
 
@@ -198,7 +211,7 @@ File: `~/.vllm-metrics.db`
 | `daily_stats` | Pre-aggregated daily rows (SUM of deltas, AVG of gauges/histograms). Kept forever for year-scale queries. |
 | `last_values` | Last-seen cumulative counter values (the baseline for next delta computation) |
 
-Rollup happens once per day after midnight (for completed dates only). The rollup:
+Rollup happens manually via `vllm-metrics rollup`. It:
 1. SELECTs all raw_snapshots for each completed date
 2. SUMs the deltas into a daily_stats row
 3. If `raw_retention_days > 0`, DELETEs raw_snapshots older than that threshold

@@ -11,6 +11,7 @@ Usage:
   vllm-metrics report --model MODEL    Filter by model name
   vllm-metrics report --server NAME    Filter by server name
   vllm-metrics report --days 30        Last N days
+  vllm-metrics rollup                  Aggregate raw snapshots into daily_stats
   vllm-metrics servers                 List configured and discovered servers
   vllm-metrics models                  List all tracked models
 """
@@ -77,6 +78,21 @@ def cmd_report(args):
         server_name=args.server,
         tz=tz_obj,
     )
+
+
+def cmd_rollup(args):
+    """Manual daily rollup: aggregate raw snapshots into daily_stats."""
+    config = load_config(args.config)
+    db_path = get_db_path(config.get('database', '~/.vllm-metrics.db'))
+    conn = connect(db_path)
+    raw_retention = config.get('raw_retention_days', 90)
+    from vllm_metrics.db import rollup_and_prune
+    rolled, pruned = rollup_and_prune(conn, raw_retention)
+    print(f"Rolled up {rolled} date(s) into daily_stats")
+    if pruned:
+        print(f"Pruned {pruned} raw snapshot(s)")
+    else:
+        print("No raw snapshots pruned (raw_retention_days=0 keeps everything)")
 
 
 def cmd_servers(args):
@@ -159,6 +175,9 @@ def main():
     # models
     sub.add_parser('models', help='List tracked models')
 
+    # rollup
+    sub.add_parser('rollup', help='Aggregate raw snapshots into daily_stats (manual)')
+
     args = parser.parse_args()
 
     if args.command == 'daemon':
@@ -171,6 +190,8 @@ def main():
         cmd_servers(args)
     elif args.command == 'models':
         cmd_models(args)
+    elif args.command == 'rollup':
+        cmd_rollup(args)
 
 
 if __name__ == '__main__':

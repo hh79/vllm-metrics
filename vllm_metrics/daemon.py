@@ -21,7 +21,6 @@ from .db import (
     connect, get_db_path,
     upsert_server, update_last_seen, get_servers, upsert_model,
     store_snapshot, get_last_values, save_last_values,
-    rollup_and_prune,
 )
 
 
@@ -148,22 +147,12 @@ def daemon_loop(config: dict):
     print(f"  Press Ctrl+C to stop")
     print()
 
-    last_rollup_date = ''
-
     while True:
         try:
             # Scrape all servers
             now_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
             print(f"[{now_str}] Scraping...")
             run_once(conn, config, failed_servers)
-
-            # Daily rollup and pruning (once per day, after midnight)
-            today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
-            if today != last_rollup_date:
-                rolled, pruned = rollup_and_prune(conn, raw_retention)
-                if rolled > 0 or pruned > 0:
-                    print(f"  [MAINT] Rolled up {rolled} date(s), pruned {pruned} raw snapshot(s)")
-                last_rollup_date = today
 
             time.sleep(interval)
 

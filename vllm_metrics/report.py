@@ -23,12 +23,14 @@ def _fmt_s(seconds: float | None) -> str:
 def _fmt_decimal(n: float) -> str:
     if n >= 100:
         return f'{n:.0f}'
-    if n >= 1:
+    if n >= 10:
         return f'{n:.1f}'
-    if n >= 0.01:
+    if n >= 1:
         return f'{n:.2f}'
-    if n >= 0.001:
+    if n >= 0.01:
         return f'{n:.3f}'
+    if n >= 0.001:
+        return f'{n:.4f}'
     return f'~{n:.2g}'
 
 

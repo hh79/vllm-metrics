@@ -1,6 +1,6 @@
 # vLLM Metrics Collector
 
-[![GitHub](https://img.shields.io/badge/github-kmarecki%2Fvllm--metrics-blue?logo=github)](https://github.com/kmarecki/vllm-metrics)
+[![GitHub](https://img.shields.io/badge/github-hh79%2Fvllm--metrics-blue?logo=github)](https://github.com/hh79/vllm-metrics)
 
 Track token generation across all your vLLM servers — aggregated by model, stored for years,
 safe against restarts and downtime.

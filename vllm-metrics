@@ -49,11 +49,20 @@ def cmd_report(args):
     db_path = get_db_path(config.get('database', '~/.vllm-metrics.db'))
     conn = connect(db_path)
 
+    tz = config.get('timezone', 'auto')
+    if isinstance(tz, str):
+        from vllm_metrics.report import _detect_timezone
+        tz_obj = _detect_timezone(tz)
+    else:
+        tz_obj = timezone.utc
+
+    local_now = datetime.now(tz_obj)
+
     since = None
     until = None
 
     if args.days:
-        since = (datetime.now(timezone.utc) - timedelta(days=args.days)).date()
+        since = (local_now - timedelta(days=args.days)).date()
     elif args.since:
         since = datetime.fromisoformat(args.since).date()
 
@@ -66,6 +75,7 @@ def cmd_report(args):
         until=until,
         model_name=args.model,
         server_name=args.server,
+        tz=tz_obj,
     )
 
 
@@ -73,6 +83,8 @@ def cmd_servers(args):
     config = load_config(args.config)
     db_path = get_db_path(config.get('database', '~/.vllm-metrics.db'))
     conn = connect(db_path)
+    from vllm_metrics.report import _detect_timezone
+    tz = _detect_timezone(config.get('timezone', 'auto'))
     from vllm_metrics.db import get_servers
     servers = get_servers(conn)
     if not servers:
@@ -81,7 +93,10 @@ def cmd_servers(args):
     print(f"{'Name':<24} {'URL':<36} {'Last Seen':<20}")
     print("-" * 80)
     for sv in servers:
-        last = datetime.fromtimestamp(sv['last_seen']).strftime('%Y-%m-%d %H:%M') if sv.get('last_seen') else 'never'
+        if sv.get('last_seen'):
+            last = datetime.fromtimestamp(sv['last_seen'], tz=tz).strftime('%Y-%m-%d %H:%M')
+        else:
+            last = 'never'
         print(f"{sv['name']:<24} {sv['url']:<36} {last:<20}")
 
 

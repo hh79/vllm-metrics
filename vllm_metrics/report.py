@@ -10,6 +10,40 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional
 from collections import defaultdict
 import time as _time
+import os
+import subprocess
+
+
+def _detect_timezone(config_tz: str | None = None) -> datetime.tzinfo:
+    """Return a tzinfo from config, auto-detect, or fallback to UTC."""
+    if config_tz and config_tz.lower() not in ('auto', 'utc', ''):
+        from zoneinfo import ZoneInfo
+        try:
+            return ZoneInfo(config_tz)
+        except (KeyError, TypeError):
+            pass
+
+    if config_tz and config_tz.lower() != 'auto':
+        # Explicitly set to UTC (or invalid — fall through to auto)
+        return timezone.utc
+
+    # Auto-detect from system
+    for method in [
+        lambda: subprocess.run(
+            ['timedatectl', 'show', '--property=Timezone', '--value'],
+            capture_output=True, text=True, timeout=5
+        ).stdout.strip(),
+        lambda: open('/etc/timezone').read().strip(),
+    ]:
+        try:
+            tz_name = method()
+            if tz_name:
+                from zoneinfo import ZoneInfo
+                return ZoneInfo(tz_name)
+        except Exception:
+            continue
+
+    return timezone.utc
 
 
 def _fmt_s(seconds: float | None) -> str:
@@ -310,13 +344,28 @@ def _print_row(left, right, width=55):
     print(f"  {left:<{width}} {right}")
 
 
-def generate_report(conn, since=None, until=None, model_name=None, server_name=None):
+def generate_report(conn, since=None, until=None, model_name=None, server_name=None, tz=None):
     """
     Generate a full usage report.
+
+    Args:
+        tz: Optional timezone (datetime.tzinfo or string IANA name).
+            If None, auto-detects from system or falls back to UTC.
     """
+    # Resolve timezone
+    if isinstance(tz, str):
+        tz = _detect_timezone(tz)
+    elif tz is None:
+        tz = _detect_timezone()
+    elif not isinstance(tz, (timezone, type(None))):
+        # Assume ZoneInfo or similar tzinfo
+        pass
+
+    local_now = datetime.now(tz)
+
     if since is None:
         # Default: last 7 days
-        since = (datetime.now(timezone.utc) - timedelta(days=7)).date()
+        since = (local_now - timedelta(days=7)).date()
     if isinstance(since, str):
         since = datetime.fromisoformat(since).date()
     if isinstance(until, str):
@@ -326,7 +375,7 @@ def generate_report(conn, since=None, until=None, model_name=None, server_name=N
     if until:
         period += f"  to  {until}"
     else:
-        period += f"  to  {datetime.now(timezone.utc).date()}"
+        period += f"  to  {local_now.date()}"
 
     # Query raw snapshots first (live data, time-weighted averages)
     rows = _run_raw_summary(conn, since=since, until=until, model_name=model_name, server_name=server_name)

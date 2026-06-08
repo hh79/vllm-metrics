@@ -22,3 +22,9 @@ database: ~/.vllm-metrics.db
 # How long to keep raw snapshots before pruning to daily rollups (days)
 # Set to 0 to keep raw data forever (recommended for per-hour graphs).
 raw_retention_days: 0
+
+# Display timezone for timestamps in reports.
+# Set to 'auto' to detect from system (timedatectl / /etc/timezone),
+# or specify an IANA timezone like 'Europe/Prague', 'America/New_York'.
+# Falls back to UTC if detection fails.
+timezone: Europe/Prague

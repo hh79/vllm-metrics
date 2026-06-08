@@ -562,39 +562,51 @@ def generate_report(conn, since=None, until=None, model_name=None, server_name=N
     print()
 
     # =====================================================
-    # DAILY TREND (summary table)
+    # DAILY TREND (summary table, timezone-aware)
     # =====================================================
     _print_separator()
     print("  DAILY TREND")
     _print_separator('-')
 
     cursor = conn.cursor()
+    # Expand query range by 1 day on each side to account for timezone offset
+    q_since = (since - timedelta(days=1)).isoformat() if since else '2000-01-01'
+    q_until = (until + timedelta(days=1)).isoformat() if until else '2099-12-31'
     cursor.execute(f"""
         SELECT
-            d.date,
-            SUM(d.generation_tokens) AS gen_tokens,
-            SUM(d.prompt_tokens) AS prompt_tokens,
-            SUM(d.completed_requests) AS requests
-        FROM daily_stats d
-        JOIN servers s ON d.server_id = s.id
-        WHERE d.date >= ? AND d.date <= ?
-        GROUP BY d.date
-        ORDER BY d.date DESC
-        LIMIT 31
-    """, (
-        since.isoformat(),
-        (until or datetime.now(timezone.utc).date()).isoformat(),
-    ))
-    daily_rows = cursor.fetchall()
+            r.timestamp,
+            r.generation_tokens_total,
+            r.prompt_tokens_total,
+            r.request_success_total
+        FROM raw_snapshots r
+        JOIN servers s ON r.server_id = s.id
+        WHERE DATE(r.timestring) >= ? AND DATE(r.timestring) <= ?
+        ORDER BY r.timestamp
+    """, (q_since, q_until))
+    rows = cursor.fetchall()
 
-    if daily_rows:
+    from collections import OrderedDict
+    local_daily = OrderedDict()
+    for row in rows:
+        # Convert each snapshot timestamp to local timezone
+        dt_utc = datetime.fromtimestamp(row['timestamp'], tz=timezone.utc)
+        d_local = dt_utc.astimezone(tz).date()
+        # Only show dates within the requested range
+        if (since is None or d_local >= since) and (until is None or d_local <= until):
+            entry = local_daily.setdefault(d_local,
+                {'gen_tokens': 0, 'prompt_tokens': 0, 'requests': 0})
+            entry['gen_tokens'] += (row['generation_tokens_total'] or 0)
+            entry['prompt_tokens'] += (row['prompt_tokens_total'] or 0)
+            entry['requests'] += (row['request_success_total'] or 0)
+
+    if local_daily:
         print(f"  {'Date':<14} {'Prompt tok':>12} {'Gen tok':>12} {'Requests':>10}")
         _print_separator('-')
-        for row in daily_rows:
-            print(f"  {row['date']:<14} {_fmt_number(row['prompt_tokens']):>12} "
-                  f"{_fmt_number(row['gen_tokens']):>12} {_fmt_number(row['requests']):>10}")
+        for date, entry in sorted(local_daily.items(), reverse=True):
+            print(f"  {date.isoformat():<14} {_fmt_number(entry['prompt_tokens']):>12} "
+                  f"{_fmt_number(entry['gen_tokens']):>12} {_fmt_number(entry['requests']):>10}")
     else:
-        print("  (No daily rollup data yet -- run the collector for at least a day)")
+        print("  (No data yet -- run the collector for at least a day)")
 
     print()
     _print_separator()

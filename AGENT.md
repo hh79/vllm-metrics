@@ -11,7 +11,7 @@ statistics per model, and stores them in SQLite for long-term reporting.
 
 ## Key Design Decisions
 
-### Delta-at-Ingest (Never store raw cumulative counters)
+### Delta-at-Ingest (Anti-Double-Count, never store raw cumulative counters)
 
 vLLM's `/metrics` returns **cumulative counters** that only go up. Storing them
 raw and computing `MAX-MIN` at query time breaks when vLLM restarts (counters
@@ -21,8 +21,26 @@ reset to 0).
 delta. The baseline is the last-seen cumulative value, stored in the
 `last_values` table.
 
-**Reset detection:** If `current < baseline` for a counter, the server restarted.
-In that case, delta = current (the counter started fresh from 0).
+```
+Scrape #1:  cumulative=500    → no delta (first baseline)
+Scrape #2:  cumulative=700    → delta=700-500=200    ← stored
+Scrape #3:  cumulative=950    → delta=950-700=250    ← stored
+```
+
+Report just sums deltas — no MAX-MIN trickery.
+
+**Reset detection (server restart):** If `current < baseline` for a counter, the
+server restarted. The delta = current (the counter started fresh from 0).
+
+```
+Scrape #4:  cumulative=0      → 0-950=-4800 → RESET → delta=0
+Scrape #5:  cumulative=120    → 120-0=120           ← stored
+```
+
+**Server downtime:** When vLLM is unreachable, the baseline stays unchanged.
+When vLLM returns, the next scrape computes the delta from the old baseline —
+capturing everything that happened during the gap. No data lost, nothing
+double-counted.
 
 Located in: `vllm_metrics/scraper.py` → `compute_deltas()`
 

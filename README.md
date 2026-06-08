@@ -167,37 +167,6 @@ systemctl --user daemon-reload
 systemctl --user list-units --type=service
 ```
 
-## Delta Tracking (Anti-Double-Count)
-
-The collector **never stores raw cumulative Prometheus counters**. Instead, on each
-scrape it computes `current - last_baseline` and stores only the **delta**:
-
-```
-Scrape #1:  cumulative=500    → no delta (first baseline)
-Scrape #2:  cumulative=700    → delta=700-500=200    ← stored
-Scrape #3:  cumulative=950    → delta=950-700=250    ← stored
-```
-
-This means the report just sums deltas — no `MAX-MIN` trickery needed.
-
-### Server restart
-
-If vLLM crashes and restarts, the counter drops (e.g. `950 → 0 → 120`):
-
-```
-Scrape #4:  cumulative=0      → 0-950=-4800 → RESET → delta=0
-Scrape #5:  cumulative=120    → 120-0=120           ← stored
-```
-
-Rule: **if a counter decreased, treat the new value as the delta** (counter started
-fresh at 0 after restart). No data lost, nothing double-counted.
-
-### Server downtime
-
-When vLLM is unreachable, the daemon prints `[FAIL]` once per server and moves on.
-The baseline stays unchanged. When vLLM returns, the next scrape computes the delta
-from the old baseline — correctly capturing everything that happened during the gap.
-
 ## Config
 
 Edit `config.yaml`:
